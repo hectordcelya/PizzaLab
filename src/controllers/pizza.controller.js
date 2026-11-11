@@ -1,6 +1,6 @@
 const Pizza = require('../models/pizza.model');
 
-// 1. CREAR una nueva pizza
+
 const crearPizza = async (req, res) => {
   try {
     const { nombre, precio } = req.body;
@@ -11,7 +11,7 @@ const crearPizza = async (req, res) => {
   }
 };
 
-// 2. OBTENER todas las pizzas
+
 const obtenerPizzas = async (req, res) => {
   try {
     const pizzas = await Pizza.findAll();

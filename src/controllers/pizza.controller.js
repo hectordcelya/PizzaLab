@@ -22,6 +22,8 @@ const getProductos = async (req, res) => {
                 precio,
                 descripcion,
                 id_categoria,
+                imagen_url,
+                seccion,
                 categoria (nombre),
                 tamano (id_tamano, nombre)
             `)

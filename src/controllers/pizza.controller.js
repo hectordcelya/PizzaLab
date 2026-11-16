@@ -1,78 +1,85 @@
-const Pizza = require('../models/pizza.model');
+const supabase = require('../config/database');
 
-
-const crearPizza = async (req, res) => {
-  try {
-    const { nombre, precio } = req.body;
-    const nuevaPizza = await Pizza.create({ nombre, precio });
-    res.status(201).json({ mensaje: 'Pizza creada con éxito 🍕', pizza: nuevaPizza });
-  } catch (error) {
-    res.status(500).json({ error: 'Error al crear la pizza', detalle: error.message });
-  }
-};
-
-
-const obtenerPizzas = async (req, res) => {
-  try {
-    const pizzas = await Pizza.findAll();
-    res.json(pizzas);
-  } catch (error) {
-    res.status(500).json({ error: 'Error al obtener las pizzas', detalle: error.message });
-  }
-};
-
-// 3. OBTENER una pizza por su ID
-const obtenerPizzaPorId = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const pizza = await Pizza.findByPk(id);
-    if (!pizza) {
-      return res.status(404).json({ error: 'Pizza no encontrada' });
+// Obtener categorías
+const getCategorias = async (req, res) => {
+    try {
+        const { data, error } = await supabase.from('categoria').select('*').eq('id_estado', 1);
+        if (error) throw error;
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.json(pizza);
-  } catch (error) {
-    res.status(500).json({ error: 'Error al buscar la pizza', detalle: error.message });
-  }
 };
 
-// 4. ACTUALIZAR una pizza
-const actualizarPizza = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { nombre, precio } = req.body;
-    
-    const pizza = await Pizza.findByPk(id);
-    if (!pizza) {
-      return res.status(404).json({ error: 'Pizza no encontrada' });
+// Obtener productos con su categoría y tamaño
+const getProductos = async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('producto')
+            .select(`
+                id_producto,
+                nombre,
+                precio,
+                descripcion,
+                id_categoria,
+                categoria (nombre),
+                tamano (id_tamano, nombre)
+            `)
+            .eq('id_estado', 1);
+        if (error) throw error;
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    await pizza.update({ nombre, precio });
-    res.json({ mensaje: 'Pizza actualizada con éxito 🚀', pizza });
-  } catch (error) {
-    res.status(500).json({ error: 'Error al actualizar la pizza', detalle: error.message });
-  }
 };
 
-// 5. ELIMINAR una pizza
-const eliminarPizza = async (req, res) => {
-  try {
+// Obtener ingredientes base de una pizza
+const getIngredientesProducto = async (req, res) => {
     const { id } = req.params;
-    const pizza = await Pizza.findByPk(id);
-    if (!pizza) {
-      return res.status(404).json({ error: 'Pizza no encontrada' });
+    try {
+        const { data, error } = await supabase
+            .from('ingrediente_x_producto')
+            .select(`
+                es_removible,
+                ingrediente (
+                    id_ingrediente,
+                    nombre,
+                    descripcion
+                )
+            `)
+            .eq('id_producto', id);
+        if (error) throw error;
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
+};
 
-    await pizza.destroy();
-    res.json({ mensaje: 'Pizza eliminada correctamente 🗑️' });
-  } catch (error) {
-    res.status(500).json({ error: 'Error al eliminar la pizza', detalle: error.message });
-  }
+// Obtener precios de ingredientes adicionales según el tamaño
+const getPreciosIngredientesPorTamano = async (req, res) => {
+    const { id_tamano } = req.params;
+    try {
+        const { data, error } = await supabase
+            .from('tamano_x_ingrediente')
+            .select(`
+                precio,
+                ingrediente (
+                    id_ingrediente,
+                    nombre,
+                    descripcion
+                )
+            `)
+            .eq('id_tamano', id_tamano);
+        if (error) throw error;
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 };
 
 module.exports = {
-  crearPizza,
-  obtenerPizzas,
-  obtenerPizzaPorId,
-  actualizarPizza,
-  eliminarPizza
+    getCategorias,
+    getProductos,
+    getIngredientesProducto,
+    getPreciosIngredientesPorTamano
 };

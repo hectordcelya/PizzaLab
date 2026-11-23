@@ -51,7 +51,9 @@ const normalizeOrderInput = (body = {}) => {
         nombre: clienteFields.nombre ?? body.nombre,
         telefono: clienteFields.telefono ?? body.telefono,
         email: clienteFields.email ?? body.email,
-        id_persona: clienteFields.id_persona ?? body.id_persona
+        id_cliente: clienteFields.id_cliente ?? body.id_cliente,
+        id_persona: clienteFields.id_persona ?? body.id_persona,
+        access_token: clienteFields.access_token ?? body.access_token ?? body.token
     };
     const direccion = {
         direccion_completa: direccionFields.direccion_completa ||
@@ -66,13 +68,57 @@ const normalizeOrderInput = (body = {}) => {
     return { ...body, cliente, direccion };
 };
 
-const resolveCustomerId = async (cliente, rollback) => {
-    if (cliente.id_persona !== undefined && cliente.id_persona !== null) {
-        if (!Number.isInteger(Number(cliente.id_persona)) || Number(cliente.id_persona) <= 0) {
-            throw new Error('id_persona no es válido');
-        }
-        return Number(cliente.id_persona);
+const normalizeCustomerId = (id) => {
+    if (id === undefined || id === null || id === '') return null;
+    const normalizedId = Number(id);
+    if (!Number.isInteger(normalizedId) || normalizedId <= 0) {
+        throw new Error('id_cliente/id_persona no es válido');
     }
+    return normalizedId;
+};
+
+const resolveAuthenticatedCustomerId = async (cliente, requestedCustomerId) => {
+    const authorization = cliente.access_token;
+    if (!authorization) return null;
+
+    const token = authorization.replace(/^Bearer\s+/i, '').trim();
+    if (!token) throw new Error('El token de autenticación está vacío');
+
+    const { data: authData, error: authError } = await supabaseAdmin.auth.getUser(token);
+    if (authError || !authData.user) {
+        throw new Error(authError?.message || 'El token de autenticación no es válido');
+    }
+
+    const user = authData.user;
+    const metadata = { ...user.app_metadata, ...user.user_metadata };
+    const authenticatedId = normalizeCustomerId(metadata.id_cliente ?? metadata.id_persona);
+    if (authenticatedId) {
+        if (requestedCustomerId && requestedCustomerId !== authenticatedId) {
+            throw new Error('El id de cliente no coincide con el usuario autenticado');
+        }
+        return authenticatedId;
+    }
+
+    if (requestedCustomerId) return requestedCustomerId;
+
+    if (user.email) {
+        const { data: person, error } = await supabaseAdmin
+            .from('persona')
+            .select('id_persona')
+            .eq('email', user.email)
+            .maybeSingle();
+        if (error) throw error;
+        if (person) return person.id_persona;
+    }
+
+    throw new Error('No se encontró una persona vinculada al usuario autenticado');
+};
+
+const resolveCustomerId = async (cliente, rollback) => {
+    const requestedCustomerId = normalizeCustomerId(cliente.id_cliente ?? cliente.id_persona);
+    const authenticatedCustomerId = await resolveAuthenticatedCustomerId(cliente, requestedCustomerId);
+    if (authenticatedCustomerId) return authenticatedCustomerId;
+    if (requestedCustomerId) return requestedCustomerId;
 
     const guestName = isNonEmptyString(cliente.nombre) ? cliente.nombre.trim() : 'Cliente Invitado';
     const lookupField = isNonEmptyString(cliente.telefono)
@@ -167,7 +213,7 @@ const linkAddressToCustomer = async (idCliente, idDireccion, rollback) => {
     }
 };
 
-const validateOrder = ({ cliente, direccion, id_metodo_pago, total, items }) => {
+const validateOrder = ({ cliente, direccion, id_metodo_pago, total, costo_domicilio, items }) => {
 
     if (!cliente || typeof cliente !== 'object' || Array.isArray(cliente)) {
         return 'Se requiere el nombre del cliente';
@@ -181,8 +227,12 @@ const validateOrder = ({ cliente, direccion, id_metodo_pago, total, items }) => 
     if (!Number.isInteger(Number(id_metodo_pago)) || Number(id_metodo_pago) <= 0) {
         return 'id_metodo_pago no es válido';
     }
-    if (!isFiniteNumber(Number(total)) || Number(total) < 0) {
+    if (total === null || total === '' || !isFiniteNumber(Number(total)) || Number(total) < 0) {
         return 'total no es válido';
+    }
+    if (costo_domicilio === undefined || costo_domicilio === null || costo_domicilio === '' ||
+        !isFiniteNumber(Number(costo_domicilio)) || Number(costo_domicilio) < 0) {
+        return 'costo_domicilio no es válido';
     }
     if (!Array.isArray(items) || items.length === 0) {
         return 'Se requiere al menos un ítem';
@@ -197,11 +247,18 @@ const validateOrder = ({ cliente, direccion, id_metodo_pago, total, items }) => 
             Number(item.cantidad) <= 0 ||
             !isFiniteNumber(Number(item.precio_unitario)) ||
             Number(item.precio_unitario) < 0 ||
+            item.subtotal === null ||
+            item.subtotal === '' ||
             !isFiniteNumber(Number(item.subtotal)) ||
             Number(item.subtotal) < 0
         ) {
             return 'Uno o más ítems no son válidos';
         }
+    }
+
+    const productsTotal = items.reduce((sum, item) => sum + Number(item.subtotal), 0);
+    if (Number(total) + 0.01 < productsTotal + Number(costo_domicilio)) {
+        return 'total debe incluir el subtotal de productos y el costo de domicilio';
     }
 
     return null;
@@ -217,6 +274,8 @@ const createOrder = async (req, res) => {
     const rollback = {};
     try {
         const { cliente, direccion, id_metodo_pago, total, items } = orderInput;
+        const authorization = req.get('authorization');
+        if (authorization) cliente.access_token = authorization;
         const idCliente = await resolveCustomerId(cliente, rollback);
 
         const { data: address, error: addressError } = await supabaseAdmin
@@ -253,7 +312,14 @@ const createOrder = async (req, res) => {
             id_producto: Number(item.id_producto),
             cantidad: Number(item.cantidad),
             precio_unitario: Number(item.precio_unitario),
-            subtotal: Number(item.subtotal)
+            subtotal: Number(item.subtotal),
+            descripcion_detalle: typeof item.descripcion_detalle === 'string'
+                ? item.descripcion_detalle
+                : typeof item.observaciones === 'string'
+                    ? item.observaciones
+                    : item.descripcion_detalle == null
+                        ? ''
+                        : JSON.stringify(item.descripcion_detalle)
         }));
         const { error: itemsError } = await supabaseAdmin
             .from('producto_x_pedido')

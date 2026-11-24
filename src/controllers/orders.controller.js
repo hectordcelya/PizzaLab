@@ -3,6 +3,51 @@ const { randomUUID } = require('node:crypto');
 
 const isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;
 const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+const normalizePositiveInteger = (value) => {
+    if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) return null;
+    const normalized = Number(value);
+    return Number.isInteger(normalized) && normalized > 0 ? normalized : null;
+};
+
+const isRemovedIngredient = (ingredient) => [
+    ingredient.removido,
+    ingredient.removed,
+    ingredient.quitado,
+    ingredient.eliminado,
+    ingredient.is_removed,
+    ingredient.isRemoved
+].some((value) => value === true);
+
+const getOrderItemIngredients = (item) => {
+    const ingredientLists = [item.ingredientes, item.adicionales, item.tamano_ingredientes];
+    const ingredients = ingredientLists.flatMap((list) => {
+        if (Array.isArray(list)) return list;
+        return list && typeof list === 'object' ? [list] : [];
+    });
+
+    if (item.id_tamano_x_ingrediente !== undefined && ingredients.length === 0) {
+        ingredients.push({
+            id_tamano_x_ingrediente: item.id_tamano_x_ingrediente,
+            cantidad: item.cantidad_ingrediente
+        });
+    }
+
+    return ingredients
+        .filter((ingredient) => ingredient && typeof ingredient === 'object' && !isRemovedIngredient(ingredient))
+        .map((ingredient) => {
+            const idTamanoIngrediente = normalizePositiveInteger(ingredient.id_tamano_x_ingrediente);
+            const hasQuantity = typeof ingredient.cantidad === 'number' ||
+                (typeof ingredient.cantidad === 'string' && ingredient.cantidad.trim() !== '');
+            const cantidad = ingredient.cantidad === undefined || ingredient.cantidad === null
+                ? 1
+                : hasQuantity
+                    ? Number(ingredient.cantidad)
+                    : NaN;
+            if (!idTamanoIngrediente || !Number.isFinite(cantidad) || cantidad <= 0) return null;
+            return { id_tamano_x_ingrediente: idTamanoIngrediente, cantidad };
+        })
+        .filter(Boolean);
+};
 
 // Reglas vigentes de PizzaLab (public.metodo_pago / public.estado)
 const PAYMENT_METHOD_CASH = 1;
@@ -210,6 +255,18 @@ const resolveCustomerId = async (cliente, rollback) => {
 const rollbackOrder = async (rollback) => {
     const failures = [];
 
+    if (rollback.productItemIds?.length) {
+        try {
+            const { error } = await supabaseAdmin
+                .from('tamano_x_ingrediente_x_producto_x_pedido')
+                .delete()
+                .in('id_producto_x_pedido', rollback.productItemIds);
+            if (error) failures.push({ table: 'tamano_x_ingrediente_x_producto_x_pedido', error });
+        } catch (error) {
+            failures.push({ table: 'tamano_x_ingrediente_x_producto_x_pedido', error });
+        }
+    }
+
     const deletions = [
         ['producto_x_pedido', rollback.items, 'id_pedido'],
         ['pedido', rollback.pedido, 'id_pedido'],
@@ -383,10 +440,29 @@ const createOrder = async (req, res) => {
                         ? ''
                         : JSON.stringify(item.descripcion_detalle)
         }));
-        const { error: itemsError } = await supabaseAdmin
+        const { data: insertedItems, error: itemsError } = await supabaseAdmin
             .from('producto_x_pedido')
-            .insert(orderItems);
+            .insert(orderItems)
+            .select('id_producto_x_pedido');
         if (itemsError) throw itemsError;
+        if (!insertedItems || insertedItems.length !== items.length) {
+            throw new Error('No se pudieron recuperar los identificadores de los ítems del pedido');
+        }
+        rollback.productItemIds = insertedItems.map(({ id_producto_x_pedido }) => id_producto_x_pedido);
+
+        const orderIngredients = items.flatMap((item, index) => (
+            getOrderItemIngredients(item).map(({ id_tamano_x_ingrediente, cantidad }) => ({
+                id_producto_x_pedido: insertedItems[index].id_producto_x_pedido,
+                id_tamano_x_ingrediente,
+                cantidad
+            }))
+        ));
+        if (orderIngredients.length) {
+            const { error: ingredientsError } = await supabaseAdmin
+                .from('tamano_x_ingrediente_x_producto_x_pedido')
+                .insert(orderIngredients);
+            if (ingredientsError) throw ingredientsError;
+        }
 
         return res.status(201).json({ success: true, id_pedido: order.id_pedido });
     } catch (error) {

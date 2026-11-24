@@ -471,10 +471,20 @@ const createOrder = async (req, res) => {
                 const numericPrice = precio == null ? 0 : Number(precio);
                 return [id_tamano_x_ingrediente, Number.isFinite(numericPrice) ? numericPrice : 0];
             }));
-            const ingredientsToInsert = orderIngredients.map((ingredient) => ({
-                ...ingredient,
-                precio_unitario: priceByIngredientId.get(ingredient.id_tamano_x_ingrediente) ?? 0
-            }));
+            const ingredientsToInsert = orderIngredients.map((ingredient) => {
+                const precio_unitario = priceByIngredientId.get(ingredient.id_tamano_x_ingrediente) ?? 0;
+                const cantidad = Number(ingredient.cantidad);
+                const calculatedSubtotal = Number.isFinite(precio_unitario) && Number.isFinite(cantidad)
+                    ? precio_unitario * cantidad
+                    : 0;
+                return {
+                    id_tamano_x_ingrediente: ingredient.id_tamano_x_ingrediente,
+                    id_producto_x_pedido: ingredient.id_producto_x_pedido,
+                    cantidad: ingredient.cantidad,
+                    precio_unitario,
+                    subtotal: Number.isFinite(calculatedSubtotal) ? calculatedSubtotal : 0
+                };
+            });
             const { error: ingredientsError } = await supabaseAdmin
                 .from('tamano_x_ingrediente_x_producto_x_pedido')
                 .insert(ingredientsToInsert);

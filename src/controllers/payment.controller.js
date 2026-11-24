@@ -3,7 +3,7 @@ const { GoogleGenAI } = require('@google/genai');
 const prompt =
   'Analiza esta imagen y determina únicamente si corresponde visualmente a un comprobante de transferencia bancaria, recibo de pago digital (como Nequi, Daviplata, Bancolombia o similar) o factura. No valides montos, fechas ni remitentes. Responde estrictamente con un JSON: {"isValid": true} si parece un comprobante, o {"isValid": false} si es cualquier otra cosa (selfie, meme, paisaje, objeto, etc.).';
 
-const MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+const MODELS = ['gemini-3.5-flash-lite', 'gemini-2.5-flash'];
 
 const validateReceipt = async (req, res) => {
   try {

@@ -4,6 +4,26 @@ const { randomUUID } = require('node:crypto');
 const isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;
 const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 
+// Reglas vigentes de PizzaLab (public.metodo_pago / public.estado)
+const PAYMENT_METHOD_CASH = 1;
+const PAYMENT_METHOD_TRANSFER = 4;
+const ALLOWED_PAYMENT_METHODS = [PAYMENT_METHOD_CASH, PAYMENT_METHOD_TRANSFER];
+const ORDER_STATE_PENDING = 3;
+
+class HttpError extends Error {
+    constructor(status, message) {
+        super(message);
+        this.status = status;
+    }
+}
+
+const parseBoolean = (value, fallback) => {
+    if (typeof value === 'boolean') return value;
+    if (value === 'true' || value === 1 || value === '1') return true;
+    if (value === 'false' || value === 0 || value === '0') return false;
+    return fallback;
+};
+
 const DEMO_DELIVERIES = [
     {
         id_pedido: 901,
@@ -56,16 +76,19 @@ const normalizeOrderInput = (body = {}) => {
         access_token: clienteFields.access_token ?? body.access_token ?? body.token
     };
     const direccion = {
+        id_direccion: direccionFields.id_direccion ?? body.id_direccion,
         direccion_completa: direccionFields.direccion_completa ||
             (typeof body.direccion === 'string' ? body.direccion : body.direccion_completa),
         referencia: direccionFields.referencia ?? body.referencia
     };
+    // Por defecto el pedido es a domicilio; "Recoger en tienda" envía is_delivery=false.
+    const isDelivery = parseBoolean(body.is_delivery, true);
 
     if (!isNonEmptyString(cliente.nombre)) {
         cliente.nombre = 'Cliente Invitado';
     }
 
-    return { ...body, cliente, direccion };
+    return { ...body, cliente, direccion, is_delivery: isDelivery };
 };
 
 const normalizeCustomerId = (id) => {
@@ -82,19 +105,32 @@ const resolveAuthenticatedCustomerId = async (cliente, requestedCustomerId) => {
     if (!authorization) return null;
 
     const token = authorization.replace(/^Bearer\s+/i, '').trim();
-    if (!token) throw new Error('El token de autenticación está vacío');
+    if (!token) throw new HttpError(401, 'El token de autenticación está vacío');
 
     const { data: authData, error: authError } = await supabaseAdmin.auth.getUser(token);
     if (authError || !authData.user) {
-        throw new Error(authError?.message || 'El token de autenticación no es válido');
+        throw new HttpError(401, authError?.message || 'El token de autenticación no es válido');
     }
 
     const user = authData.user;
+    const { data: personByAuthId, error: personByAuthIdError } = await supabaseAdmin
+        .from('persona')
+        .select('id_persona')
+        .eq('identificador_externo', user.id)
+        .maybeSingle();
+    if (personByAuthIdError) throw personByAuthIdError;
+    if (personByAuthId) {
+        if (requestedCustomerId && requestedCustomerId !== personByAuthId.id_persona) {
+            throw new HttpError(403, 'El id de cliente no coincide con el usuario autenticado');
+        }
+        return personByAuthId.id_persona;
+    }
+
     const metadata = { ...user.app_metadata, ...user.user_metadata };
     const authenticatedId = normalizeCustomerId(metadata.id_cliente ?? metadata.id_persona);
     if (authenticatedId) {
         if (requestedCustomerId && requestedCustomerId !== authenticatedId) {
-            throw new Error('El id de cliente no coincide con el usuario autenticado');
+            throw new HttpError(403, 'El id de cliente no coincide con el usuario autenticado');
         }
         return authenticatedId;
     }
@@ -111,7 +147,7 @@ const resolveAuthenticatedCustomerId = async (cliente, requestedCustomerId) => {
         if (person) return person.id_persona;
     }
 
-    throw new Error('No se encontró una persona vinculada al usuario autenticado');
+    throw new HttpError(404, 'No se encontró una persona vinculada al usuario autenticado');
 };
 
 const resolveCustomerId = async (cliente, rollback) => {
@@ -213,25 +249,29 @@ const linkAddressToCustomer = async (idCliente, idDireccion, rollback) => {
     }
 };
 
-const validateOrder = ({ cliente, direccion, id_metodo_pago, total, costo_domicilio, items }) => {
+const validateOrder = ({ cliente, direccion, id_metodo_pago, total, costo_domicilio, items, is_delivery }) => {
 
     if (!cliente || typeof cliente !== 'object' || Array.isArray(cliente)) {
         return 'Se requiere el nombre del cliente';
     }
-    if (!direccion || typeof direccion !== 'object' || Array.isArray(direccion)) {
-        return 'Se requiere el objeto direccion';
+    if (is_delivery) {
+        if (!direccion || typeof direccion !== 'object' || Array.isArray(direccion)) {
+            return 'Se requiere el objeto direccion';
+        }
+        if (!isNonEmptyString(direccion.direccion_completa)) {
+            return 'direccion.direccion_completa es obligatorio';
+        }
+    } else if (!isNonEmptyString(cliente.telefono)) {
+        return 'Se requiere un teléfono de contacto para recoger en tienda';
     }
-    if (!isNonEmptyString(direccion.direccion_completa)) {
-        return 'direccion.direccion_completa es obligatorio';
-    }
-    if (!Number.isInteger(Number(id_metodo_pago)) || Number(id_metodo_pago) <= 0) {
-        return 'id_metodo_pago no es válido';
+    if (!ALLOWED_PAYMENT_METHODS.includes(Number(id_metodo_pago))) {
+        return 'id_metodo_pago no es válido (1 = Efectivo, 4 = Transferencia)';
     }
     if (total === null || total === '' || !isFiniteNumber(Number(total)) || Number(total) < 0) {
         return 'total no es válido';
     }
-    if (costo_domicilio === undefined || costo_domicilio === null || costo_domicilio === '' ||
-        !isFiniteNumber(Number(costo_domicilio)) || Number(costo_domicilio) < 0) {
+    if (is_delivery && (costo_domicilio === undefined || costo_domicilio === null || costo_domicilio === '' ||
+        !isFiniteNumber(Number(costo_domicilio)) || Number(costo_domicilio) < 0)) {
         return 'costo_domicilio no es válido';
     }
     if (!Array.isArray(items) || items.length === 0) {
@@ -257,7 +297,8 @@ const validateOrder = ({ cliente, direccion, id_metodo_pago, total, costo_domici
     }
 
     const productsTotal = items.reduce((sum, item) => sum + Number(item.subtotal), 0);
-    if (Number(total) + 0.01 < productsTotal + Number(costo_domicilio)) {
+    const deliveryFee = is_delivery ? Number(costo_domicilio) : 0;
+    if (Number(total) + 0.01 < productsTotal + deliveryFee) {
         return 'total debe incluir el subtotal de productos y el costo de domicilio';
     }
 
@@ -273,33 +314,54 @@ const createOrder = async (req, res) => {
 
     const rollback = {};
     try {
-        const { cliente, direccion, id_metodo_pago, total, items } = orderInput;
+        const { cliente, direccion, id_metodo_pago, total, items, is_delivery: isDelivery } = orderInput;
         const authorization = req.get('authorization');
         if (authorization) cliente.access_token = authorization;
         const idCliente = await resolveCustomerId(cliente, rollback);
 
-        const { data: address, error: addressError } = await supabaseAdmin
-            .from('direccion')
-            .insert({
-                direccion_completa: direccion.direccion_completa.trim(),
-                referencia: isNonEmptyString(direccion.referencia) ? direccion.referencia.trim() : null,
-                id_estado: 1
-            })
-            .select('id_direccion')
-            .single();
-        if (addressError) throw addressError;
-        rollback.direccion = address.id_direccion;
-        await linkAddressToCustomer(idCliente, address.id_direccion, rollback);
+        // Recoger en tienda: sin dirección ni domiciliario.
+        let idDireccion = null;
+        if (isDelivery) {
+            const requestedAddressId = normalizeCustomerId(direccion.id_direccion);
+            if (requestedAddressId) {
+                // Reutiliza una dirección guardada solo si pertenece al cliente.
+                const { data: ownedLink, error: ownedLinkError } = await supabaseAdmin
+                    .from('direcciones_x_cliente')
+                    .select('id_direccion')
+                    .eq('id_cliente', idCliente)
+                    .eq('id_direccion', requestedAddressId)
+                    .maybeSingle();
+                if (ownedLinkError) throw ownedLinkError;
+                if (!ownedLink) throw new HttpError(403, 'La dirección seleccionada no pertenece al cliente');
+                idDireccion = requestedAddressId;
+            } else {
+                const { data: address, error: addressError } = await supabaseAdmin
+                    .from('direccion')
+                    .insert({
+                        direccion_completa: direccion.direccion_completa.trim(),
+                        referencia: isNonEmptyString(direccion.referencia) ? direccion.referencia.trim() : null,
+                        id_estado: 1
+                    })
+                    .select('id_direccion')
+                    .single();
+                if (addressError) throw addressError;
+                rollback.direccion = address.id_direccion;
+                await linkAddressToCustomer(idCliente, address.id_direccion, rollback);
+                idDireccion = address.id_direccion;
+            }
+        }
 
         const { data: order, error: orderError } = await supabaseAdmin
             .from('pedido')
             .insert({
                 id_cliente: idCliente,
-                id_direccion: address.id_direccion,
+                id_direccion: idDireccion,
+                // El administrador asigna el domiciliario después (queda "En preparación").
+                id_domiciliario: null,
                 id_metodo_pago: Number(id_metodo_pago),
-                id_estado: 1,
+                id_estado: ORDER_STATE_PENDING,
                 total: Number(total),
-                is_delivery: true
+                is_delivery: isDelivery
             })
             .select('id_pedido')
             .single();
@@ -333,7 +395,7 @@ const createOrder = async (req, res) => {
         if (rollbackFailures.length) {
             console.error('No se pudieron revertir todos los registros del pedido:', rollbackFailures);
         }
-        return res.status(500).json({
+        return res.status(error instanceof HttpError ? error.status : 500).json({
             success: false,
             message: error.message || 'No se pudo crear el pedido'
         });

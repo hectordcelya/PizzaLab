@@ -458,9 +458,26 @@ const createOrder = async (req, res) => {
             }))
         ));
         if (orderIngredients.length) {
+            const uniqueIds = [...new Set(orderIngredients.map(
+                ({ id_tamano_x_ingrediente }) => id_tamano_x_ingrediente
+            ))];
+            const { data: ingredientPrices, error: ingredientPricesError } = await supabaseAdmin
+                .from('tamano_x_ingrediente')
+                .select('id_tamano_x_ingrediente, precio')
+                .in('id_tamano_x_ingrediente', uniqueIds);
+            if (ingredientPricesError) throw ingredientPricesError;
+
+            const priceByIngredientId = new Map((ingredientPrices || []).map(({ id_tamano_x_ingrediente, precio }) => {
+                const numericPrice = precio == null ? 0 : Number(precio);
+                return [id_tamano_x_ingrediente, Number.isFinite(numericPrice) ? numericPrice : 0];
+            }));
+            const ingredientsToInsert = orderIngredients.map((ingredient) => ({
+                ...ingredient,
+                precio_unitario: priceByIngredientId.get(ingredient.id_tamano_x_ingrediente) ?? 0
+            }));
             const { error: ingredientsError } = await supabaseAdmin
                 .from('tamano_x_ingrediente_x_producto_x_pedido')
-                .insert(orderIngredients);
+                .insert(ingredientsToInsert);
             if (ingredientsError) throw ingredientsError;
         }
 
